@@ -15,6 +15,24 @@ def get_all_subscribed_regions(config):
     subscribed_regions = identity_client.list_region_subscriptions(tenancy_id).data
     return [r.region_name for r in subscribed_regions]
 
+
+def get_os_cost(os_name, ocpus):
+    """
+    Calculate additional OS licensing cost per month.
+    """
+    # Example Windows pricing per OCPU per hour (Adjust as needed)
+    os_pricing_table = {
+        "Windows": 0.092,  # Cost per OCPU per hour for Windows OS
+        # Add other OS costs here if needed
+    }
+
+    # Default OS cost is 0
+    os_cost_per_ocpu = os_pricing_table.get(os_name, 0)
+
+    # Calculate monthly cost (730 hours per month)
+    return ocpus * os_cost_per_ocpu * 730
+
+
 def get_all_compartments(identity_client, tenancy_id):
     """
     Return a list of all active compartments in the tenancy (including root).
@@ -39,7 +57,6 @@ def get_all_compartments(identity_client, tenancy_id):
     compartments.extend(compartments_data)
 
     return compartments
-
 
 def list_instances_and_volumes(config, region, compartment_id):
     """
@@ -114,8 +131,13 @@ def list_instances_and_volumes(config, region, compartment_id):
             block_size = block_size + blockinfo.size_in_mbs
             block_cost += get_storage_cost(blockinfo.size_in_mbs, region)
 
+        
 
-        estimated_compute_cost_per_month = get_instance_cost(instance.shape, ocpus, memory_in_gbs, region) * 730
+        image = compute_client.get_image(instance.image_id).data
+
+        if instance.lifecycle_state == "STOPPED": estimated_compute_cost_per_month = 0
+        else: estimated_compute_cost_per_month = get_instance_cost(instance.shape, ocpus, memory_in_gbs, region) * 730
+        total_os_cost_per_month = get_os_cost(image.operating_system, ocpus)
         total_storage_cost_per_month = boot_cost + block_cost
 
         record = {
@@ -124,6 +146,7 @@ def list_instances_and_volumes(config, region, compartment_id):
             "instance_name": instance.display_name,
             "instance_state" : instance.lifecycle_state,
             "instance_ocid": instance.id,
+            "OS": image.operating_system,
             "shape": instance.shape,
             "ocpus": ocpus,
             "memory_in_gbs": memory_in_gbs,
@@ -133,15 +156,14 @@ def list_instances_and_volumes(config, region, compartment_id):
             "block_volumes": block_volumes,
             "date_created": date_created,
             "estimated_compute_cost_per_month": estimated_compute_cost_per_month,
+            "estimated_os_cost_per_month": total_os_cost_per_month,
             "estimated_storage_cost_per_month": total_storage_cost_per_month,  # Add storage cost
-            "total_cost_per_month": estimated_compute_cost_per_month + total_storage_cost_per_month  # Compute total cost
+            "total_cost_per_month": estimated_compute_cost_per_month + total_storage_cost_per_month + total_os_cost_per_month  # Compute total cost
 
         }
         data.append(record)
 
     return data
-
-
 
 def get_storage_cost(size_in_mbs, region):
     """
@@ -167,6 +189,7 @@ def get_instance_cost(shape, ocpus, memory_in_gbs, region):
     Estimate the cost of an OCI compute instance based on its shape, OCPUs, and memory.
     Prices are region-dependent and may need to be updated.
     """
+
     # Example pricing in USD per hour (Adjust based on OCI's latest pricing)
     pricing_table = {
       "VM.Standard3.Flex": {"ocpu": 0.04, "memory": 0.0015},  # Per OCPU and GB per hour
@@ -189,7 +212,6 @@ def get_instance_cost(shape, ocpus, memory_in_gbs, region):
             return (ocpus * pricing_table[shape]["ocpu"]) + (memory_in_gbs * pricing_table[shape]["memory"])
 
     return 0  # Default if shape is unknown
-
 
 def main():
     # Load default config from ~/.oci/config or specify config_file and profile_name
@@ -236,6 +258,7 @@ def main():
         "instance_state",
         "instance_name",
         "instance_ocid",
+        "OS",
         "shape",
         "ocpus",
         "memory_in_gbs",
@@ -245,6 +268,7 @@ def main():
         "block_volumes",
         "date_created",
         "estimated_compute_cost_per_month",
+        "estimated_os_cost_per_month",
         "estimated_storage_cost_per_month",  # Add this column
         "total_cost_per_month"  # Add this column
     ]
