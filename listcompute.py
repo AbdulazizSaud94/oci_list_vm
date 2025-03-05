@@ -213,6 +213,106 @@ def get_instance_cost(shape, ocpus, memory_in_gbs, region):
 
     return 0  # Default if shape is unknown
 
+def list_mysql_databases(config, region, compartment_id):
+    data = []
+    region_config = config.copy()
+    region_config["region"] = region
+    mysql_client = oci.mysql.DbSystemClient(region_config)
+
+    # Get a list of MySQL DB Systems
+    mysql_instances = oci.pagination.list_call_get_all_results(
+        mysql_client.list_db_systems, compartment_id=compartment_id
+    ).data
+
+    for db in mysql_instances:
+        
+        # Exclude DELETED DB Systems
+        if db.lifecycle_state == "DELETED":
+            continue  # Skip this DB System
+
+        # Fetch full DB System details
+        db_details = mysql_client.get_db_system(db.id).data
+
+
+        date_created = db_details.time_created.replace(tzinfo=None) if db_details.time_created else None
+
+        db_cost = get_mysql_cost(db.shape_name, db_details.data_storage_size_in_gbs)
+        print(db_cost)
+        record = {
+            "region": region,
+            "compartment_id": compartment_id,
+            "db_system_name": db.display_name,
+            "db_system_id": db.id,
+            "shape": db.shape_name,  # Defines CPU & memory
+            "data_storage_size_in_gbs": db_details.data_storage_size_in_gbs,  # Storage size (Now correctly retrieved)
+            "availability_domain": db.availability_domain,  # Shows where it's hosted
+            "is_highly_available": db.is_highly_available,  # HA setup flag
+            "state": db.lifecycle_state,  # Current status
+            "time_created": date_created,
+            "db_cost": db_cost
+        }
+        data.append(record)
+
+    return data
+
+
+def get_mysql_cost(shape, storage_in_gbs):
+    """
+    Estimate the cost of an OCI MySQL instance based on its shape and storage.
+    """
+    # Pricing table (per hour costs per OCPU and memory for known shapes)
+    pricing_table = {
+        "MySQL.VM.Standard.E3": {"ocpus": 1, "memory": 8, "ocpu_price": 0.025, "memory_price": 0.0015},
+        "MySQL.VM.Standard.E4": {"ocpus": 1, "memory": 16, "ocpu_price": 0.030, "memory_price": 0.002},
+        "MySQL.HeatWave.VM.Standard.E3": {"ocpus": 16, "memory": 512, "ocpu_price": 0.04, "memory_price": 0.0025},
+        "MySQL.HeatWave.VM.Standard.E4": {"ocpus": 16, "memory": 1024, "ocpu_price": 0.045, "memory_price": 0.003},
+        "MySQL.HeatWave.BM.Standard.E3": {"ocpus": 32, "memory": 2048, "ocpu_price": 0.06, "memory_price": 0.004},
+        "MySQL.VM.Standard2.8.120GB": {"ocpus": 8, "memory": 120, "ocpu_price": 0.05, "memory_price": 0.003},
+        "MySQL.VM.Standard.E3.4.64GB": {"ocpus": 4, "memory": 64, "ocpu_price": 0.035, "memory_price": 0.002},
+        "MySQL.HeatWave.VM.Standard": {"ocpus": 32, "memory": 2048, "ocpu_price": 0.06, "memory_price": 0.004},
+        "MySQL.VM.Standard1.1": {"ocpus": 1, "memory": 7, "ocpu_price": 0.020, "memory_price": 0.0012},
+        "MySQL.VM.Standard2.1": {"ocpus": 1, "memory": 15, "ocpu_price": 0.022, "memory_price": 0.0013},
+        "MySQL.VM.Standard2.2": {"ocpus": 2, "memory": 30, "ocpu_price": 0.024, "memory_price": 0.0014},
+        "MySQL.VM.Standard2.4": {"ocpus": 4, "memory": 60, "ocpu_price": 0.028, "memory_price": 0.0016},
+        "MySQL.VM.Standard2.8": {"ocpus": 8, "memory": 120, "ocpu_price": 0.032, "memory_price": 0.0018},
+        "MySQL.VM.Standard2.16": {"ocpus": 16, "memory": 240, "ocpu_price": 0.038, "memory_price": 0.002},
+        "MySQL.VM.Standard2.24": {"ocpus": 24, "memory": 320, "ocpu_price": 0.042, "memory_price": 0.0022},
+        "MySQL.2": {"ocpus": 2, "memory": 16, "ocpu_price": 0.03, "memory_price": 0.0015},
+        "MySQL.4": {"ocpus": 4, "memory": 32, "ocpu_price": 0.035, "memory_price": 0.002},
+        "MySQL.8": {"ocpus": 8, "memory": 64, "ocpu_price": 0.04, "memory_price": 0.0025},
+        "MySQL.16": {"ocpus": 16, "memory": 128, "ocpu_price": 0.045, "memory_price": 0.003},
+        "MySQL.32": {"ocpus": 32, "memory": 256, "ocpu_price": 0.05, "memory_price": 0.0035},
+        "MySQL.48": {"ocpus": 48, "memory": 384, "ocpu_price": 0.055, "memory_price": 0.004},
+        "MySQL.64": {"ocpus": 64, "memory": 512, "ocpu_price": 0.06, "memory_price": 0.0045},
+        "MySQL.256": {"ocpus": 256, "memory": 2048, "ocpu_price": 0.07, "memory_price": 0.005}
+    }
+    
+    
+    storage_cost_per_gb_month = 0.0255  # USD per GB per month
+    
+    # Get shape details
+    shape_details = pricing_table.get(shape, None)
+    if not shape_details:
+        return {"error": "Unknown shape"}
+    
+    ocpus = shape_details["ocpus"]
+    memory_in_gbs = shape_details["memory"]
+    ocpu_cost = ocpus * shape_details["ocpu_price"]
+    memory_cost = memory_in_gbs * shape_details["memory_price"]
+    
+    # Storage cost (per month, converted to hourly)
+    storage_cost_per_hour = (storage_in_gbs * storage_cost_per_gb_month) / 730
+    
+    # Total estimated cost per hour
+    total_cost_per_hour = ocpu_cost + memory_cost + storage_cost_per_hour
+    
+    # Total estimated cost per month (730 hours)
+    total_cost_per_month = total_cost_per_hour * 730
+    
+    return  round(total_cost_per_month, 2)
+    
+
+
 def main():
     # Load default config from ~/.oci/config or specify config_file and profile_name
     config = oci.config.from_file()  # e.g., oci.config.from_file("~/.oci/config","DEFAULT")
@@ -226,7 +326,8 @@ def main():
     compartments = get_all_compartments(identity_client, tenancy_id)
 
 
-    all_data = []
+    all_compute_data = []
+    all_mysql_data = []
 
     # # Iterate over each region
     for region in regions:
@@ -237,21 +338,24 @@ def main():
                 print(compartment.name)
                 compartment_name = compartment.name
                 compartment_id = compartment.id
-                instance_data = list_instances_and_volumes(config, region, compartment_id)
 
-                # Convert each record to a final dictionary that includes the compartment_name
-                for rec in instance_data:
+                # Compute Instances
+                compute_data = list_instances_and_volumes(config, region, compartment_id)
+                for rec in compute_data:
                     rec["compartment_name"] = compartment_name
-                    all_data.append(rec)
+                    all_compute_data.append(rec)
 
+                # MySQL Databases
+                mysql_data = list_mysql_databases(config, region, compartment_id)
+                for rec in mysql_data:
+                    rec["compartment_name"] = compartment_name
+                    all_mysql_data.append(rec)
 
-
-
-    # Convert to Pandas DataFrame
-    df = pd.DataFrame(all_data)
+    df_compute = pd.DataFrame(all_compute_data)
+    df_mysql = pd.DataFrame(all_mysql_data)
 
     # Reorder columns for neatness (adjust as desired)
-    columns_order = [
+    compute_columns_order = [
         "region",
         "compartment_name",
         "compartment_id",
@@ -272,11 +376,17 @@ def main():
         "estimated_storage_cost_per_month",  # Add this column
         "total_cost_per_month"  # Add this column
     ]
-    df = df[columns_order]
+    df_compute = df_compute[compute_columns_order]
 
-    # Export to Excel
-    output_file = "oci_compute_inventory.xlsx"
-    df.to_excel(output_file, index=False)
+
+
+
+
+    output_file = "oci_inventory.xlsx"
+    with pd.ExcelWriter(output_file) as writer:
+        df_compute.to_excel(writer, sheet_name="Compute Instances", index=False)
+        df_mysql.to_excel(writer, sheet_name="MySQL Databases", index=False)
+
     print(f"\nExported results to {output_file}")
 
 if __name__ == "__main__":
